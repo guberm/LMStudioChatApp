@@ -1,5 +1,11 @@
 package com.guberdev.lmstudiochat
 
+import com.google.gson.GsonBuilder
+import com.google.gson.JsonArray
+import com.google.gson.JsonElement
+import com.google.gson.JsonObject
+import com.google.gson.JsonSerializationContext
+import com.google.gson.JsonSerializer
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import okhttp3.ResponseBody
@@ -9,9 +15,47 @@ import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Streaming
+import java.lang.reflect.Type
 import java.util.concurrent.TimeUnit
 
-data class ChatMessage(val role: String, val content: String)
+data class ChatMessage(
+    val role: String,
+    val content: String,
+    val images: List<String>? = null  // base64-encoded JPEG images for vision models
+)
+
+// Serializes ChatMessage for the API:
+//   text-only  → {"role":"...", "content":"..."}
+//   with images → {"role":"...", "content":[{"type":"text","text":"..."},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."}},…]}
+private class ChatMessageApiSerializer : JsonSerializer<ChatMessage> {
+    override fun serialize(src: ChatMessage, typeOfSrc: Type, context: JsonSerializationContext): JsonElement {
+        val obj = JsonObject()
+        obj.addProperty("role", src.role)
+        val imgs = src.images ?: emptyList()
+        if (imgs.isEmpty()) {
+            obj.addProperty("content", src.content)
+        } else {
+            val arr = JsonArray()
+            if (src.content.isNotBlank()) {
+                val textPart = JsonObject()
+                textPart.addProperty("type", "text")
+                textPart.addProperty("text", src.content)
+                arr.add(textPart)
+            }
+            imgs.forEach { b64 ->
+                val imagePart = JsonObject()
+                imagePart.addProperty("type", "image_url")
+                val urlObj = JsonObject()
+                urlObj.addProperty("url", "data:image/jpeg;base64,$b64")
+                imagePart.add("image_url", urlObj)
+                arr.add(imagePart)
+            }
+            obj.add("content", arr)
+        }
+        return obj
+    }
+}
+
 data class ChatRequest(
     val model: String = "local-model",
     val messages: List<ChatMessage>,
@@ -44,6 +88,10 @@ object LmStudioApiClient {
     var BASE_URL = "http://10.0.2.2:1234/v1/"
     private var extraHeaders: Map<String, String> = emptyMap()
 
+    private val apiGson = GsonBuilder()
+        .registerTypeAdapter(ChatMessage::class.java, ChatMessageApiSerializer())
+        .create()
+
     private fun buildClient(): OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS)
@@ -59,7 +107,7 @@ object LmStudioApiClient {
     private fun buildRetrofit(): Retrofit = Retrofit.Builder()
         .baseUrl(BASE_URL)
         .client(buildClient())
-        .addConverterFactory(GsonConverterFactory.create())
+        .addConverterFactory(GsonConverterFactory.create(apiGson))
         .build()
 
     var apiService: LmStudioApiService = buildRetrofit().create(LmStudioApiService::class.java)

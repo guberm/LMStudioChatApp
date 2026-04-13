@@ -4,22 +4,29 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
+import android.util.Base64
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -29,11 +36,14 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -45,10 +55,14 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 // ── Themes ────────────────────────────────────────────────────────────────────
 
@@ -301,11 +315,13 @@ fun ChatScreen(
     onBackToSettings: () -> Unit
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var inputText by remember { mutableStateOf("") }
     val messages = viewModel.messages
     val isLoading by viewModel.isLoading.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
     val activeConnection by viewModel.activeConnection.collectAsState()
+    val pendingImages by viewModel.pendingImages.collectAsState()
     val listState = rememberLazyListState()
 
     var showHistorySheet by remember { mutableStateOf(false) }
@@ -313,6 +329,8 @@ fun ChatScreen(
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showNewChatConfirm by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
+    var showAttachMenu by remember { mutableStateOf(false) }
+    var clipboardHasImage by remember { mutableStateOf(false) }
     val currentSessionId by viewModel.currentSessionId.collectAsState()
 
     // TTS
@@ -327,6 +345,15 @@ fun ChatScreen(
         uri?.let {
             val content = viewModel.exportChatToMarkdown()
             context.contentResolver.openOutputStream(it)?.use { os -> os.write(content.toByteArray()) }
+        }
+    }
+
+    // Image picker
+    val imagePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        uris.forEach { uri ->
+            scope.launch {
+                uriToBase64(context, uri)?.let { viewModel.addPendingImage(it) }
+            }
         }
     }
 
@@ -382,30 +409,84 @@ fun ChatScreen(
                 shape = RoundedCornerShape(32.dp),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
-                Row(Modifier.fillMaxWidth().padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = inputText,
-                        onValueChange = { inputText = it },
-                        modifier = Modifier.weight(1f).padding(start = 12.dp),
-                        placeholder = { Text("Message LM Studio…", color = Color.Gray, fontSize = 16.sp) },
-                        maxLines = 4,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent,
-                            focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent
+                Column {
+                    // Pending images preview strip
+                    if (pendingImages.isNotEmpty()) {
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            itemsIndexed(pendingImages) { index, base64 ->
+                                PendingImageThumbnail(base64) { viewModel.removePendingImage(index) }
+                            }
+                        }
+                        HorizontalDivider(Modifier.padding(horizontal = 12.dp))
+                    }
+                    Row(Modifier.fillMaxWidth().padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        // Attach button with dropdown
+                        Box {
+                            IconButton(
+                                onClick = {
+                                    clipboardHasImage = hasClipboardImage(context)
+                                    showAttachMenu = true
+                                },
+                                modifier = Modifier.size(44.dp)
+                            ) {
+                                Icon(
+                                    Icons.Filled.AttachFile,
+                                    "Attach",
+                                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            DropdownMenu(showAttachMenu, { showAttachMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Choose from Gallery") },
+                                    leadingIcon = { Icon(Icons.Filled.Image, null) },
+                                    onClick = { showAttachMenu = false; imagePickerLauncher.launch("image/*") }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Paste from Clipboard") },
+                                    leadingIcon = { Icon(Icons.Filled.ContentPaste, null) },
+                                    enabled = clipboardHasImage,
+                                    onClick = {
+                                        showAttachMenu = false
+                                        scope.launch {
+                                            getClipboardImageUri(context)?.let { uri ->
+                                                uriToBase64(context, uri)?.let { viewModel.addPendingImage(it) }
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                        OutlinedTextField(
+                            value = inputText,
+                            onValueChange = { inputText = it },
+                            modifier = Modifier.weight(1f).padding(start = 4.dp),
+                            placeholder = { Text("Message LM Studio…", color = Color.Gray, fontSize = 16.sp) },
+                            maxLines = 4,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color.Transparent, unfocusedBorderColor = Color.Transparent,
+                                focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent
+                            )
                         )
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Box(
-                        modifier = Modifier.size(50.dp).clip(RoundedCornerShape(25.dp))
-                            .background(if (isLoading) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
-                            .clickable {
-                                if (isLoading) viewModel.stopGeneration()
-                                else if (inputText.isNotBlank()) { viewModel.sendMessage(inputText); inputText = "" }
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (isLoading) Icon(Icons.Filled.Close, "Stop", tint = Color.White, modifier = Modifier.size(24.dp))
-                        else Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(24.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Box(
+                            modifier = Modifier.size(50.dp).clip(RoundedCornerShape(25.dp))
+                                .background(if (isLoading) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+                                .clickable {
+                                    if (isLoading) viewModel.stopGeneration()
+                                    else if (inputText.isNotBlank() || pendingImages.isNotEmpty()) {
+                                        viewModel.sendMessage(inputText)
+                                        inputText = ""
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (isLoading) Icon(Icons.Filled.Close, "Stop", tint = Color.White, modifier = Modifier.size(24.dp))
+                            else Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(24.dp))
+                        }
                     }
                 }
             }
@@ -564,10 +645,32 @@ fun ChatBubble(message: ChatMessage, theme: AppTheme, tts: TextToSpeech?) {
                     .padding(padding)
                     .combinedClickable(onClick = {}, onLongClick = { showMenu = true })
             ) {
-                if (!isUser && message.content.isNotBlank()) {
-                    SimpleMarkdownText(message.content, textColor, codeBackground)
-                } else {
-                    Text(message.content, fontSize = 16.sp, color = textColor, lineHeight = 24.sp)
+                Column {
+                    val imgs = message.images ?: emptyList()
+                    imgs.forEach { base64 ->
+                        val bitmap = remember(base64) {
+                            try {
+                                val bytes = Base64.decode(base64, Base64.DEFAULT)
+                                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            } catch (_: Exception) { null }
+                        }
+                        bitmap?.let {
+                            Image(
+                                bitmap = it.asImageBitmap(),
+                                contentDescription = "Attached image",
+                                modifier = Modifier
+                                    .sizeIn(maxWidth = 280.dp, maxHeight = 280.dp)
+                                    .clip(RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Fit
+                            )
+                            if (message.content.isNotBlank()) Spacer(Modifier.height(6.dp))
+                        }
+                    }
+                    if (!isUser && message.content.isNotBlank()) {
+                        SimpleMarkdownText(message.content, textColor, codeBackground)
+                    } else if (message.content.isNotBlank()) {
+                        Text(message.content, fontSize = 16.sp, color = textColor, lineHeight = 24.sp)
+                    }
                 }
             }
 
@@ -593,6 +696,73 @@ fun ChatBubble(message: ChatMessage, theme: AppTheme, tts: TextToSpeech?) {
                     }
                 )
             }
+        }
+    }
+}
+
+// ── Image helpers ─────────────────────────────────────────────────────────────
+
+suspend fun uriToBase64(context: Context, uri: Uri, maxDimension: Int = 768): String? =
+    withContext(Dispatchers.IO) {
+        try {
+            val inputStream = context.contentResolver.openInputStream(uri) ?: return@withContext null
+            val original = BitmapFactory.decodeStream(inputStream)
+            inputStream.close()
+            val scale = minOf(maxDimension.toFloat() / original.width, maxDimension.toFloat() / original.height, 1f)
+            val scaled = if (scale < 1f)
+                Bitmap.createScaledBitmap(original, (original.width * scale).toInt(), (original.height * scale).toInt(), true)
+            else original
+            val out = ByteArrayOutputStream()
+            scaled.compress(Bitmap.CompressFormat.JPEG, 75, out)
+            Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+        } catch (_: Exception) { null }
+    }
+
+fun hasClipboardImage(context: Context): Boolean {
+    val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip ?: return false
+    return (0 until clip.itemCount).any { i ->
+        val item = clip.getItemAt(i)
+        item.uri != null && context.contentResolver.getType(item.uri!!)?.startsWith("image/") == true
+    } || clip.description.hasMimeType("image/*")
+}
+
+fun getClipboardImageUri(context: Context): Uri? {
+    val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip ?: return null
+    return (0 until clip.itemCount).firstNotNullOfOrNull { i ->
+        val uri = clip.getItemAt(i)?.uri ?: return@firstNotNullOfOrNull null
+        if (context.contentResolver.getType(uri)?.startsWith("image/") == true) uri else null
+    }
+}
+
+@Composable
+fun PendingImageThumbnail(base64: String, onRemove: () -> Unit) {
+    val bitmap = remember(base64) {
+        try {
+            val bytes = Base64.decode(base64, Base64.DEFAULT)
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        } catch (_: Exception) { null }
+    }
+    Box(modifier = Modifier.size(64.dp)) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)),
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            Box(Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)).background(Color.Gray))
+        }
+        Box(
+            modifier = Modifier
+                .size(18.dp)
+                .align(Alignment.TopEnd)
+                .clip(RoundedCornerShape(50))
+                .background(Color.Black.copy(alpha = 0.65f))
+                .clickable(onClick = onRemove),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Filled.Close, null, tint = Color.White, modifier = Modifier.size(11.dp))
         }
     }
 }

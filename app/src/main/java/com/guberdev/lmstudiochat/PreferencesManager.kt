@@ -39,7 +39,9 @@ class PreferencesManager(context: Context) {
         return raw.map { p ->
             p.copy(
                 chatHistory = (p.chatHistory ?: emptyList()).map { s ->
-                    s.copy(messages = s.messages ?: emptyList())
+                    s.copy(messages = (s.messages ?: emptyList()).map { msg ->
+                        msg.copy(images = msg.images ?: emptyList())
+                    })
                 },
                 activeSessionId = p.activeSessionId ?: ""
             )

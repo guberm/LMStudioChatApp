@@ -47,6 +47,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _currentSessionId = MutableStateFlow("")
     val currentSessionId: StateFlow<String> = _currentSessionId
 
+    private val _pendingImages = MutableStateFlow<List<String>>(emptyList())
+    val pendingImages: StateFlow<List<String>> = _pendingImages
+
     private var activeResponseBody: okhttp3.ResponseBody? = null
 
     init {
@@ -182,12 +185,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun addPendingImage(base64: String) {
+        _pendingImages.value = _pendingImages.value + base64
+    }
+
+    fun removePendingImage(index: Int) {
+        if (index in _pendingImages.value.indices)
+            _pendingImages.value = _pendingImages.value.toMutableList().also { it.removeAt(index) }
+    }
+
     fun sendMessage(userText: String) {
-        if (userText.isBlank()) return
+        val images = _pendingImages.value.toList()
+        if (userText.isBlank() && images.isEmpty()) return
+        _pendingImages.value = emptyList()
+
         val activeProfile = _activeConnection.value ?: return
         if (activeProfile.selectedModel.isBlank()) { _errorMessage.value = "Please select a model first."; return }
 
-        val userMessage = ChatMessage("user", userText.trim())
+        val userMessage = ChatMessage("user", userText.trim(), images.ifEmpty { null })
         _messages.add(userMessage)
         val assistantIndex = _messages.size
         _messages.add(ChatMessage("assistant", ""))
@@ -197,10 +212,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         streamingJob = viewModelScope.launch {
             try {
+                // Strip images from all history except the current message to keep request size manageable
+                val requestMessages = _messages.take(assistantIndex).mapIndexed { i, msg ->
+                    if (i == assistantIndex - 1) msg else msg.copy(images = null)
+                }
                 val responseBody = LmStudioApiClient.apiService.createChatCompletionStream(
                     request = ChatRequest(
                         model = activeProfile.selectedModel,
-                        messages = _messages.take(assistantIndex).toList(),
+                        messages = requestMessages,
                         stream = true
                     )
                 )

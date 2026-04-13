@@ -6,6 +6,7 @@ An Android chat app for talking to local [LM Studio](https://lmstudio.ai/) serve
 
 - **Multiple connections** — save and switch between different LM Studio servers
 - **Streaming responses** — tokens appear as they're generated, with a stop button to cancel mid-stream
+- **Image attachments** — attach images from your gallery or paste from clipboard; supports multi-select; works with vision models (LLaVA, Qwen-VL, etc.)
 - **Chat history** — sessions are saved per connection; browse, load, or delete past chats
 - **Chat renaming** — tap the chat title to rename any session
 - **ngrok support** — toggle ngrok mode per connection to skip the browser warning header

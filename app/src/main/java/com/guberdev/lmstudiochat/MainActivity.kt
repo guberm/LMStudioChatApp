@@ -357,10 +357,14 @@ fun ChatScreen(
         }
     }
 
-    // Auto-scroll: fires on new messages and as streaming content grows
-    LaunchedEffect(messages.size, messages.lastOrNull()?.content) {
-        val targetIndex = messages.count { it.role != "system" } - 1
-        if (targetIndex >= 0) listState.scrollToItem(targetIndex)
+    // Auto-scroll: snapshotFlow keeps a single stable coroutine so scroll isn't
+    // cancelled by rapid key changes during streaming.
+    LaunchedEffect(listState) {
+        snapshotFlow { messages.size to messages.lastOrNull()?.content }
+            .collect {
+                val targetIndex = messages.count { it.role != "system" } - 1
+                if (targetIndex >= 0) listState.scrollToItem(targetIndex)
+            }
     }
 
     Scaffold(
